@@ -78,11 +78,17 @@ bool V4L2Device::GetDeviceInfo(DeviceInfo* info) {
     return false;
   }
 
-  info->device_path = "";  // 需要外部设置
+  // device_path 由调用方在调用前设定，这里不覆盖。
+  // capabilities 需要考虑 device_caps 标志以获取真实能力位。
+  uint32_t capabilities = cap.capabilities;
+  if (cap.capabilities & V4L2_CAP_DEVICE_CAPS) {
+    capabilities = cap.device_caps;
+  }
+
   info->driver_name = reinterpret_cast<const char*>(cap.driver);
   info->card_name = reinterpret_cast<const char*>(cap.card);
   info->bus_info = reinterpret_cast<const char*>(cap.bus_info);
-  info->capabilities = cap.capabilities;
+  info->capabilities = capabilities;
 
   return QueryFormats(&info->formats);
 }
@@ -344,4 +350,3 @@ std::string PixelFormatToString(uint32_t pixel_format) {
 }
 
 }  // namespace v4l2_demo
-
