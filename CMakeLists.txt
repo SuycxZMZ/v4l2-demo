@@ -31,7 +31,7 @@ target_include_directories(v4l2_common
 add_executable(demo1_uyvy422
     src/demos/demo1_uyvy422/main.cpp
 )
-target_link_libraries(demo1_uyvy422 v4l2_common)
+target_link_libraries(demo1_uyvy422 v4l2_common pthread)
 target_include_directories(demo1_uyvy422
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/common

@@ -10,6 +10,8 @@
 #include <iomanip>
 #include <sstream>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 #include "v4l2_utils.h"
 
@@ -319,6 +321,8 @@ int main(int /* argc */, char* /* argv */[]) {
   stats.current_frame_index = 0;
 
   printf("开始捕获视频帧 (按 Ctrl+C 退出)...\n\n");
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 
   // 主循环：读取并处理帧
   while (true) {
