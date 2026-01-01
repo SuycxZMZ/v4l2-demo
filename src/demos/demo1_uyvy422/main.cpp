@@ -23,12 +23,22 @@ namespace {
 // 视频格式配置
 constexpr uint32_t kVideoWidth = 640;
 constexpr uint32_t kVideoHeight = 480;
-constexpr uint32_t kPixelFormat = V4L2_PIX_FMT_UYVY;  // UYVY422 格式
 
 // 帧保存配置
 constexpr int kMaxSavedFrames = 20;  // 最多保存 20 张图片
 constexpr int kSaveIntervalSeconds = 1;  // 每秒保存一帧
 constexpr const char* kOutputDirectory = "output";  // 输出目录
+
+// 优先选择的格式列表（按优先级排序）
+// 优先选择未压缩格式，然后是压缩格式
+constexpr uint32_t kPreferredFormats[] = {
+    V4L2_PIX_FMT_YUYV,   // YUYV 4:2:2 (未压缩)
+    V4L2_PIX_FMT_UYVY,   // UYVY 4:2:2 (未压缩)
+    V4L2_PIX_FMT_YUV420, // YUV 4:2:0 (未压缩)
+    V4L2_PIX_FMT_MJPEG,  // Motion-JPEG (压缩)
+    V4L2_PIX_FMT_JPEG,   // JPEG (压缩)
+};
+constexpr size_t kPreferredFormatsCount = sizeof(kPreferredFormats) / sizeof(kPreferredFormats[0]);
 
 // 帧统计信息
 struct FrameStats {
@@ -56,13 +66,26 @@ bool CreateOutputDirectory() {
   return true;
 }
 
+// 根据像素格式获取文件扩展名
+// @param pixel_format 像素格式
+// @return 文件扩展名（不含点号）
+std::string GetFileExtension(uint32_t pixel_format) {
+  if (pixel_format == V4L2_PIX_FMT_MJPEG || pixel_format == V4L2_PIX_FMT_JPEG) {
+    return "jpg";
+  }
+  // 其他格式使用 raw
+  return "raw";
+}
+
 // 生成输出文件名
 // @param frame_index 帧索引（0-19，用于循环覆盖）
+// @param pixel_format 像素格式
 // @return 文件路径
-std::string GenerateOutputFilename(int frame_index) {
+std::string GenerateOutputFilename(int frame_index, uint32_t pixel_format) {
   std::ostringstream oss;
+  std::string ext = GetFileExtension(pixel_format);
   oss << kOutputDirectory << "/frame_" << std::setfill('0') << std::setw(3)
-      << frame_index << ".raw";
+      << frame_index << "." << ext;
   return oss.str();
 }
 
@@ -70,10 +93,11 @@ std::string GenerateOutputFilename(int frame_index) {
 // @param frame_data 帧数据指针
 // @param frame_size 帧数据大小
 // @param frame_index 帧索引
+// @param pixel_format 像素格式
 // @return 成功返回 true，失败返回 false
 bool SaveFrameToFile(const void* frame_data, size_t frame_size,
-                     int frame_index) {
-  std::string filename = GenerateOutputFilename(frame_index);
+                     int frame_index, uint32_t pixel_format) {
+  std::string filename = GenerateOutputFilename(frame_index, pixel_format);
   std::ofstream file(filename, std::ios::binary);
   if (!file.is_open()) {
     fprintf(stderr, "无法打开文件 %s 进行写入\n", filename.c_str());
@@ -88,7 +112,8 @@ bool SaveFrameToFile(const void* frame_data, size_t frame_size,
     return false;
   }
 
-  printf("已保存帧到: %s (大小: %zu 字节)\n", filename.c_str(), frame_size);
+  printf("已保存帧到: %s (大小: %zu 字节, 格式: %s)\n", filename.c_str(),
+         frame_size, PixelFormatToString(pixel_format).c_str());
   return true;
 }
 
@@ -119,35 +144,67 @@ void PrintFrameInfo(const FrameStats& stats, const void* frame_data,
 }
 
 // 查找前置摄像头设备
-// @param devices 设备列表
+// @param devices 设备列表（已经过滤，只包含支持视频捕获的设备）
 // @return 设备路径，如果未找到返回空字符串
 std::string FindFrontCamera(const std::vector<DeviceInfo>& devices) {
   // 通常前置摄像头在 /dev/video0 或 /dev/video2
   // 这里优先查找 /dev/video0，如果不存在则查找第一个可用设备
+  std::string first_device = "";
+  
   for (const auto& device : devices) {
-    // 检查是否是视频捕获设备
-    if (device.capabilities & V4L2_CAP_VIDEO_CAPTURE) {
-      printf("找到视频设备: %s (%s)\n", device.device_path.c_str(),
-             device.card_name.c_str());
-      // 优先选择 /dev/video0
-      if (device.device_path == "/dev/video0") {
-        return device.device_path;
-      }
+    printf("找到视频设备: %s (%s)\n", device.device_path.c_str(),
+           device.card_name.c_str());
+    
+    // 记录第一个设备作为备选
+    if (first_device.empty()) {
+      first_device = device.device_path;
     }
-  }
-
-  // 如果没有找到 /dev/video0，返回第一个可用的捕获设备
-  for (const auto& device : devices) {
-    if (device.capabilities & V4L2_CAP_VIDEO_CAPTURE) {
+    
+    // 优先选择 /dev/video0
+    if (device.device_path == "/dev/video0") {
       return device.device_path;
     }
   }
 
-  return "";
+  // 如果没有找到 /dev/video0，返回第一个可用的捕获设备
+  return first_device;
 }
 
-int main(int argc, char* argv[]) {
-  printf("=== V4L2 Demo 1: UYVY422 视频流捕获 ===\n\n");
+// 打印所有支持的格式
+// @param formats 格式列表
+void PrintSupportedFormats(const std::vector<uint32_t>& formats) {
+  printf("设备支持的像素格式 (%zu 种):\n", formats.size());
+  for (size_t i = 0; i < formats.size(); ++i) {
+    printf("  [%zu] %s (0x%08X)\n", i, PixelFormatToString(formats[i]).c_str(),
+           formats[i]);
+  }
+  printf("\n");
+}
+
+// 从支持的格式中选择最合适的格式
+// @param supported_formats 设备支持的格式列表
+// @return 选中的格式，如果未找到返回 0
+uint32_t SelectBestFormat(const std::vector<uint32_t>& supported_formats) {
+  // 按优先级查找格式
+  for (size_t i = 0; i < kPreferredFormatsCount; ++i) {
+    uint32_t preferred_format = kPreferredFormats[i];
+    for (uint32_t supported_format : supported_formats) {
+      if (supported_format == preferred_format) {
+        return preferred_format;
+      }
+    }
+  }
+
+  // 如果没有找到优先格式，返回第一个支持的格式
+  if (!supported_formats.empty()) {
+    return supported_formats[0];
+  }
+
+  return 0;
+}
+
+int main(int /* argc */, char* /* argv */[]) {
+  printf("=== V4L2 Demo 1: 视频流捕获 ===\n\n");
 
   // 查找可用的视频设备
   std::vector<DeviceInfo> devices;
@@ -200,22 +257,22 @@ int main(int argc, char* argv[]) {
   printf("  支持的格式数量: %zu\n", device_info.formats.size());
   printf("\n");
 
-  // 检查是否支持 UYVY 格式
-  bool supports_uyvy = false;
-  for (uint32_t format : device_info.formats) {
-    if (format == V4L2_PIX_FMT_UYVY) {
-      supports_uyvy = true;
-      break;
-    }
+  // 打印所有支持的格式
+  PrintSupportedFormats(device_info.formats);
+
+  // 自动选择最合适的格式
+  uint32_t selected_format = SelectBestFormat(device_info.formats);
+  if (selected_format == 0) {
+    fprintf(stderr, "错误: 设备不支持任何已知的像素格式\n");
+    return EXIT_FAILURE;
   }
 
-  if (!supports_uyvy) {
-    printf("警告: 设备可能不支持 UYVY422 格式，尝试设置...\n");
-  }
+  printf("自动选择格式: %s\n\n", PixelFormatToString(selected_format).c_str());
 
   // 设置视频格式
-  printf("设置视频格式: %ux%u, 格式: UYVY422\n", kVideoWidth, kVideoHeight);
-  if (!device.SetFormat(kVideoWidth, kVideoHeight, kPixelFormat)) {
+  printf("设置视频格式: %ux%u, 格式: %s\n", kVideoWidth, kVideoHeight,
+         PixelFormatToString(selected_format).c_str());
+  if (!device.SetFormat(kVideoWidth, kVideoHeight, selected_format)) {
     fprintf(stderr, "错误: 无法设置视频格式\n");
     return EXIT_FAILURE;
   }
@@ -230,9 +287,13 @@ int main(int argc, char* argv[]) {
   printf("实际视频格式: %ux%u, 格式: %s\n\n", actual_width, actual_height,
          PixelFormatToString(actual_format).c_str());
 
-  if (actual_format != kPixelFormat) {
-    fprintf(stderr, "错误: 设备不支持 UYVY422 格式\n");
-    return EXIT_FAILURE;
+  // 检查实际格式是否匹配（允许设备调整格式）
+  if (actual_format != selected_format) {
+    printf("注意: 设备调整了格式，从 %s 变为 %s\n",
+           PixelFormatToString(selected_format).c_str(),
+           PixelFormatToString(actual_format).c_str());
+    // 使用实际设置的格式
+    selected_format = actual_format;
   }
 
   // 初始化内存映射
@@ -276,9 +337,9 @@ int main(int argc, char* argv[]) {
       time_t current_time = time(nullptr);
       if (difftime(current_time, stats.last_save_time) >=
           kSaveIntervalSeconds) {
-        // 保存帧
+        // 保存帧（使用实际设置的格式）
         if (SaveFrameToFile(frame_data, frame_size,
-                            stats.current_frame_index)) {
+                            stats.current_frame_index, actual_format)) {
           stats.saved_frames++;
           stats.last_save_time = current_time;
 

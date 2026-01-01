@@ -78,13 +78,8 @@ bool V4L2Device::GetDeviceInfo(DeviceInfo* info) {
     return false;
   }
 
-  // device_path 由调用方在调用前设定，这里不覆盖。
-  // capabilities 需要考虑 device_caps 标志以获取真实能力位。
-  uint32_t capabilities = cap.capabilities;
-  if (cap.capabilities & V4L2_CAP_DEVICE_CAPS) {
-    capabilities = cap.device_caps;
-  }
-
+  // 保留已有的 device_path，如果为空则保持为空（需要外部设置）
+  // info->device_path 不会被修改，由调用者设置
   info->driver_name = reinterpret_cast<const char*>(cap.driver);
   info->card_name = reinterpret_cast<const char*>(cap.card);
   info->bus_info = reinterpret_cast<const char*>(cap.bus_info);
@@ -112,11 +107,13 @@ bool V4L2Device::SetFormat(uint32_t width, uint32_t height,
     return false;
   }
 
-  // 检查实际设置的格式
+  // 检查实际设置的格式（设备可能会调整格式）
   if (fmt.fmt.pix.pixelformat != pixel_format) {
-    fprintf(stderr, "警告: 设备不支持请求的像素格式，实际格式: %s\n",
+    // 不返回错误，允许设备调整格式，由调用者决定是否接受
+    // 这里只打印警告
+    fprintf(stderr, "警告: 设备调整了像素格式，请求: %s, 实际: %s\n",
+            PixelFormatToString(pixel_format).c_str(),
             PixelFormatToString(fmt.fmt.pix.pixelformat).c_str());
-    return false;
   }
 
   return true;
@@ -328,7 +325,10 @@ int FindVideoDevices(std::vector<DeviceInfo>* devices) {
         DeviceInfo info;
         info.device_path = device_path;
         if (device.GetDeviceInfo(&info)) {
-          devices->push_back(info);
+          // 只添加支持视频捕获的设备
+          if (info.capabilities & V4L2_CAP_VIDEO_CAPTURE) {
+            devices->push_back(info);
+          }
         }
         device.Close();
       }
