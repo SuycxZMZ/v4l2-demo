@@ -1,0 +1,7 @@
+build/
+output/
+*.raw
+*.o
+*.a
+.DS_Store
+
