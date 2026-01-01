@@ -83,7 +83,7 @@ bool V4L2Device::GetDeviceInfo(DeviceInfo* info) {
   info->driver_name = reinterpret_cast<const char*>(cap.driver);
   info->card_name = reinterpret_cast<const char*>(cap.card);
   info->bus_info = reinterpret_cast<const char*>(cap.bus_info);
-  info->capabilities = capabilities;
+  info->capabilities = cap.capabilities;
 
   return QueryFormats(&info->formats);
 }
