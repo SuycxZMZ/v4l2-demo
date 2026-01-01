@@ -83,7 +83,7 @@ bool V4L2Device::GetDeviceInfo(DeviceInfo* info) {
   info->driver_name = reinterpret_cast<const char*>(cap.driver);
   info->card_name = reinterpret_cast<const char*>(cap.card);
   info->bus_info = reinterpret_cast<const char*>(cap.bus_info);
-  info->capabilities = cap.capabilities;
+  info->capabilities = capabilities;
 
   return QueryFormats(&info->formats);
 }
@@ -350,4 +350,3 @@ std::string PixelFormatToString(uint32_t pixel_format) {
 }
 
 }  // namespace v4l2_demo
-
