@@ -10,8 +10,6 @@
 #include <iomanip>
 #include <sstream>
 #include <vector>
-#include <thread>
-#include <chrono>
 
 #include "v4l2_utils.h"
 
@@ -33,12 +31,18 @@ constexpr const char* kOutputDirectory = "output";  // 输出目录
 
 // 优先选择的格式列表（按优先级排序）
 // 优先选择未压缩格式，然后是压缩格式
+// 格式说明：
+// - YUYV (4:2:2): 未压缩，每2像素4字节，640x480约600KB，质量高，实时性好
+// - UYVY (4:2:2): 类似YUYV，字节顺序不同
+// - YUV420 (4:2:0): 未压缩，文件更小，质量略低
+// - MJPEG: 压缩格式，文件小，可直接查看，适合存储
+// - JPEG: 压缩格式，类似MJPEG
 constexpr uint32_t kPreferredFormats[] = {
-    V4L2_PIX_FMT_YUYV,   // YUYV 4:2:2 (未压缩)
-    V4L2_PIX_FMT_UYVY,   // UYVY 4:2:2 (未压缩)
-    V4L2_PIX_FMT_YUV420, // YUV 4:2:0 (未压缩)
-    V4L2_PIX_FMT_MJPEG,  // Motion-JPEG (压缩)
-    V4L2_PIX_FMT_JPEG,   // JPEG (压缩)
+    V4L2_PIX_FMT_YUYV,   // YUYV 4:2:2 (未压缩，质量高)
+    V4L2_PIX_FMT_UYVY,   // UYVY 4:2:2 (未压缩，类似YUYV)
+    V4L2_PIX_FMT_YUV420, // YUV 4:2:0 (未压缩，文件更小)
+    V4L2_PIX_FMT_MJPEG,  // Motion-JPEG (压缩，可直接查看)
+    V4L2_PIX_FMT_JPEG,   // JPEG (压缩，可直接查看)
 };
 constexpr size_t kPreferredFormatsCount = sizeof(kPreferredFormats) / sizeof(kPreferredFormats[0]);
 
@@ -48,6 +52,7 @@ struct FrameStats {
   uint64_t saved_frames;      // 已保存帧数
   time_t start_time;          // 开始时间
   time_t last_save_time;      // 上次保存时间
+  time_t last_print_time;     // 上次打印时间
   uint32_t current_frame_index;  // 当前保存的帧索引（用于循环覆盖）
 };
 }  // namespace
@@ -71,11 +76,20 @@ bool CreateOutputDirectory() {
 // 根据像素格式获取文件扩展名
 // @param pixel_format 像素格式
 // @return 文件扩展名（不含点号）
+// 
+// 说明：
+// - MJPEG/JPEG: 压缩格式，保存为 .jpg，可直接用图片查看器打开
+// - YUYV/UYVY/YUV420: 未压缩的 YUV 格式，保存为 .raw
+//   .raw 文件是原始二进制数据，包含未压缩的像素数据，需要专门的工具查看
+//   对于 640x480 的 YUYV 格式，文件大小约为 614,400 字节 (约 600 KB)
+//   查看方法：使用 FFmpeg 转换，如：
+//   ffmpeg -f rawvideo -pixel_format yuyv422 -video_size 640x480 -i frame_000.raw frame_000.png
 std::string GetFileExtension(uint32_t pixel_format) {
   if (pixel_format == V4L2_PIX_FMT_MJPEG || pixel_format == V4L2_PIX_FMT_JPEG) {
     return "jpg";
   }
-  // 其他格式使用 raw
+  // 其他格式（YUYV, UYVY, YUV420 等）使用 raw
+  // .raw 文件是原始二进制数据，不能直接用图片查看器打开
   return "raw";
 }
 
@@ -114,35 +128,46 @@ bool SaveFrameToFile(const void* frame_data, size_t frame_size,
     return false;
   }
 
-  printf("已保存帧到: %s (大小: %zu 字节, 格式: %s)\n", filename.c_str(),
+  // 保存成功时打印到新行，避免与实时信息冲突
+  printf("\n[保存] %s (大小: %zu 字节, 格式: %s)\n", filename.c_str(),
          frame_size, PixelFormatToString(pixel_format).c_str());
   return true;
 }
 
-// 打印帧信息
-// @param stats 帧统计信息
-// @param frame_data 帧数据指针
+// 打印帧信息（每秒打印一次，避免刷屏）
+// @param stats 帧统计信息（会被更新 last_print_time）
+// @param frame_data 帧数据指针（未使用，保留用于未来扩展）
 // @param frame_size 帧数据大小
 // @param width 视频宽度
 // @param height 视频高度
 // @param pixel_format 像素格式
-void PrintFrameInfo(const FrameStats& stats, const void* frame_data,
+// @return 如果打印了信息返回 true，否则返回 false
+bool PrintFrameInfo(FrameStats* stats, const void* /* frame_data */,
                     size_t frame_size, uint32_t width, uint32_t height,
                     uint32_t pixel_format) {
-  time_t current_time = time(nullptr);
-  double elapsed_seconds = difftime(current_time, stats.start_time);
-  double fps = (elapsed_seconds > 0) ? stats.total_frames / elapsed_seconds : 0;
+  if (!stats) {
+    return false;
+  }
 
-  printf("\n=== 帧信息 ===\n");
-  printf("总帧数: %lu\n", stats.total_frames);
-  printf("已保存帧数: %lu\n", stats.saved_frames);
-  printf("运行时间: %.0f 秒\n", elapsed_seconds);
-  printf("平均帧率: %.2f FPS\n", fps);
-  printf("视频尺寸: %ux%u\n", width, height);
-  printf("像素格式: %s\n", PixelFormatToString(pixel_format).c_str());
-  printf("帧大小: %zu 字节\n", frame_size);
-  printf("帧数据地址: %p\n", frame_data);
-  printf("==============\n");
+  time_t current_time = time(nullptr);
+  
+  // 每秒只打印一次
+  if (difftime(current_time, stats->last_print_time) < 1.0) {
+    return false;
+  }
+
+  stats->last_print_time = current_time;
+  
+  double elapsed_seconds = difftime(current_time, stats->start_time);
+  double fps = (elapsed_seconds > 0) ? stats->total_frames / elapsed_seconds : 0;
+
+  // 使用 \r 和 ANSI 转义码实现原地更新，避免刷屏
+  printf("\r[%lu 帧] FPS: %.2f | 已保存: %lu | 尺寸: %ux%u | 格式: %s | 帧大小: %zu 字节    ",
+         stats->total_frames, fps, stats->saved_frames, width, height,
+         PixelFormatToString(pixel_format).c_str(), frame_size);
+  fflush(stdout);  // 立即刷新输出
+
+  return true;
 }
 
 // 查找前置摄像头设备
@@ -318,11 +343,11 @@ int main(int /* argc */, char* /* argv */[]) {
   FrameStats stats = {};
   stats.start_time = time(nullptr);
   stats.last_save_time = stats.start_time;
+  stats.last_print_time = stats.start_time;
   stats.current_frame_index = 0;
 
-  printf("开始捕获视频帧 (按 Ctrl+C 退出)...\n\n");
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+  printf("开始捕获视频帧 (按 Ctrl+C 退出)...\n");
+  printf("提示: 帧信息每秒更新一次，按 Ctrl+C 退出\n\n");
 
   // 主循环：读取并处理帧
   while (true) {
@@ -333,8 +358,8 @@ int main(int /* argc */, char* /* argv */[]) {
     if (device.ReadFrame(&frame_data, &frame_size)) {
       stats.total_frames++;
 
-      // 打印帧信息
-      PrintFrameInfo(stats, frame_data, frame_size, actual_width,
+      // 打印帧信息（每秒打印一次）
+      PrintFrameInfo(&stats, frame_data, frame_size, actual_width,
                      actual_height, actual_format);
 
       // 检查是否需要保存帧（每秒保存一帧）
